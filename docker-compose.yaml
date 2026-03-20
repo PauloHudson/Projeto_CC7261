@@ -1,0 +1,109 @@
+services:
+  broker:
+    build:
+      context: ./Broker
+    container_name: broker
+
+  py_server_1:
+    build:
+      context: ./Python
+    environment:
+      BACKEND_ENDPOINT: tcp://broker:5556
+      SERVICE_NAME: py_server_1
+      DATA_FILE: /app/data/state.json
+    command: ["python", "server.py"]
+    volumes:
+      - ./data/py_server_1:/app/data
+    depends_on:
+      - broker
+
+  py_server_2:
+    build:
+      context: ./Python
+    environment:
+      BACKEND_ENDPOINT: tcp://broker:5556
+      SERVICE_NAME: py_server_2
+      DATA_FILE: /app/data/state.json
+    command: ["python", "server.py"]
+    volumes:
+      - ./data/py_server_2:/app/data
+    depends_on:
+      - broker
+
+  js_server_1:
+    build:
+      context: ./JavaScript
+    environment:
+      BACKEND_ENDPOINT: tcp://broker:5556
+      SERVICE_NAME: js_server_1
+      DATA_FILE: /app/data/state.json
+    command: ["node", "server.js"]
+    volumes:
+      - ./data/js_server_1:/app/data
+    depends_on:
+      - broker
+
+  js_server_2:
+    build:
+      context: ./JavaScript
+    environment:
+      BACKEND_ENDPOINT: tcp://broker:5556
+      SERVICE_NAME: js_server_2
+      DATA_FILE: /app/data/state.json
+    command: ["node", "server.js"]
+    volumes:
+      - ./data/js_server_2:/app/data
+    depends_on:
+      - broker
+
+  py_client_1:
+    build:
+      context: ./Python
+    environment:
+      FRONTEND_ENDPOINT: tcp://broker:5555
+      USERNAME: py_bot_1
+      CHANNEL_1: geral
+      CHANNEL_2: duvidas
+      CHANNEL_3: equipe
+    command: ["python", "client.py"]
+    depends_on:
+      - broker
+
+  py_client_2:
+    build:
+      context: ./Python
+    environment:
+      FRONTEND_ENDPOINT: tcp://broker:5555
+      USERNAME: py_bot_2
+      CHANNEL_1: geral
+      CHANNEL_2: backend
+      CHANNEL_3: avisos
+    command: ["python", "client.py"]
+    depends_on:
+      - broker
+
+  js_client_1:
+    build:
+      context: ./JavaScript
+    environment:
+      FRONTEND_ENDPOINT: tcp://broker:5555
+      USERNAME: js_bot_1
+      CHANNEL_1: geral
+      CHANNEL_2: frontend
+      CHANNEL_3: noticias
+    command: ["node", "client.js"]
+    depends_on:
+      - broker
+
+  js_client_2:
+    build:
+      context: ./JavaScript
+    environment:
+      FRONTEND_ENDPOINT: tcp://broker:5555
+      USERNAME: js_bot_2
+      CHANNEL_1: geral
+      CHANNEL_2: qa
+      CHANNEL_3: suporte
+    command: ["node", "client.js"]
+    depends_on:
+      - broker
