@@ -8,6 +8,9 @@ import msgpack
 import zmq
 
 
+# Este script tem  o objetivo de implementar um servidor Python para comunicação com o broker via ZMQ. 
+#ELe processa requisições de login, criação de canais e listagem de canais, mantendo estado em arquivo JSON
+
 BACKEND_ENDPOINT = os.getenv("BACKEND_ENDPOINT", "tcp://broker:5556")
 SERVICE_NAME = os.getenv("SERVICE_NAME", "py_server")
 DATA_FILE = Path(os.getenv("DATA_FILE", f"/app/data/{SERVICE_NAME}.json"))

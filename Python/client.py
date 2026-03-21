@@ -6,6 +6,8 @@ import msgpack
 import zmq
 
 
+# Este script (utilizando a linguagem Python para esse servidor) conecta ao broker, faz login e alterna entre criar canais e listar canais
+
 FRONTEND_ENDPOINT = os.getenv("FRONTEND_ENDPOINT", "tcp://broker:5555")
 USERNAME = os.getenv("USERNAME", "bot_python")
 CHANNEL_CANDIDATES = [
@@ -16,10 +18,12 @@ CHANNEL_CANDIDATES = [
 
 
 def now_iso() -> str:
+    """Retorna a data e hora atual em formato ISO."""
     return datetime.now(timezone.utc).isoformat()
 
 
 def send_request(socket: zmq.Socket, payload: dict) -> dict:
+    """Envia uma requisição para o broker e aguarda a resposta."""
     payload["timestamp"] = now_iso()
     packed = msgpack.packb(payload, use_bin_type=True)
     print(f"[PY-CLIENT:{USERNAME}] TX {payload}", flush=True)
@@ -32,6 +36,7 @@ def send_request(socket: zmq.Socket, payload: dict) -> dict:
 
 
 def login_with_retry(socket: zmq.Socket) -> None:
+    """Tenta fazer login no broker com tentativas repetidas até sucesso."""
     while True:
         response = send_request(
             socket,
@@ -47,6 +52,7 @@ def login_with_retry(socket: zmq.Socket) -> None:
 
 
 def main() -> None:
+    """Função principal que conecta ao broker e executa o loop de operações."""
     context = zmq.Context.instance()
     socket = context.socket(zmq.REQ)
     socket.connect(FRONTEND_ENDPOINT)
@@ -58,6 +64,7 @@ def main() -> None:
 
         step = 0
         while True:
+            # Condição para a cada 3 passos criar  um canal e nos outros listr os canais
             if step % 3 == 0:
                 channel = CHANNEL_CANDIDATES[(step // 3) % len(CHANNEL_CANDIDATES)]
                 send_request(
