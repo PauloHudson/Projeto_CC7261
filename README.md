@@ -1,8 +1,8 @@
-# Projeto CC7261 - Parte 1
+# Projeto CC7261 | Parte 1 - Request-Reply
 
-Sistema de troca de mensagens instantaneas com bots usando ZeroMQ + MessagePack.
+A primeira parte do projeto relacionado à materia de Sistemas Distribuídos consiste em um sistema de troca de mensagens instantaneas com bots utilizando ZeroMQ + MessagePack.
 
-## Escolhas do grupo
+## Escolhas das linguagens e componentes
 - Linguagens: Python e JavaScript
 - Serializacao binaria: MessagePack
 - Troca de mensagens: ZeroMQ no padrao request/reply
@@ -17,14 +17,14 @@ Sistema de troca de mensagens instantaneas com bots usando ZeroMQ + MessagePack.
 - 2 clientes JavaScript
 
 Fluxo:
-1. Cliente envia `login`
-2. Servidor responde `ok` ou `error`
+1. O cliente envia `login`
+2. O servidor responde `ok` ou `error`
 3. Cliente cria canal com `create_channel`
 4. Cliente lista canais com `list_channels`
 
-Todos os pacotes trafegam em MessagePack e incluem `timestamp`.
+Todos os pacotes irão trafegar no MessagePack e incluem `timestamp`.
 
-## Regras de validacao implementadas
+## Regras de validacao implementadas na parte 1
 - Username valido: 3 a 20 caracteres (`a-z`, `A-Z`, `0-9`, `_`)
 - Channel valido: 2 a 24 caracteres (`a-z`, `0-9`, `_`, `-`)
 - Canal duplicado retorna erro `channel_already_exists`
@@ -37,8 +37,8 @@ Cada servidor grava em um arquivo proprio:
 - `data/js_server_2/state.json`
 
 Cada arquivo armazena:
-- historico de logins (`username` + `timestamp`)
-- lista de canais criados
+- O historico de logins (`username` + `timestamp`)
+- A lista de canais criados
 
 ## Pré-requisitos
 - **Docker** e **Docker Compose** instalados
@@ -67,7 +67,7 @@ Isso vai construir e iniciar todos os containers:
 - 2 Clientes Python
 - 2 Clientes JavaScript
 
-### 3. Visualizar logs
+### 3. Visualização de logs
 Para ver todos os logs em tempo real:
 ```bash
 docker compose logs -f
@@ -106,15 +106,15 @@ Isso facilita acompanhar as trocas de mensagens entre os servicos.
 
 ## Solucao de problemas
 
-### "Port already in use"
-Se as portas 5555 ou 5556 já estão em uso:
+### Caso apareça: "Port already in use"
+As portas 5555 ou 5556 já estão em uso:
 ```bash
 docker compose down
 # Aguarde 10 segundos
 docker compose up --build
 ```
 
-### Containers não iniciam
+### Caso os containers não iniciem
 Verifique se há erros nos logs:
 ```bash
 docker compose logs
