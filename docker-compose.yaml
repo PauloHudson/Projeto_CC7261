@@ -4,11 +4,18 @@ services:
       context: ./Broker
     container_name: broker
 
+  pubsub_proxy:
+    build:
+      context: ./Broker
+    container_name: pubsub_proxy
+    command: ["python", "pubsub_proxy.py"]
+
   py_server_1:
     build:
       context: ./Python
     environment:
       BACKEND_ENDPOINT: tcp://broker:5556
+      PUBSUB_PUB_ENDPOINT: tcp://pubsub_proxy:5557
       SERVICE_NAME: py_server_1
       DATA_FILE: /app/data/state.json
     command: ["python", "server.py"]
@@ -16,12 +23,14 @@ services:
       - ./data/py_server_1:/app/data
     depends_on:
       - broker
+      - pubsub_proxy
 
   py_server_2:
     build:
       context: ./Python
     environment:
       BACKEND_ENDPOINT: tcp://broker:5556
+      PUBSUB_PUB_ENDPOINT: tcp://pubsub_proxy:5557
       SERVICE_NAME: py_server_2
       DATA_FILE: /app/data/state.json
     command: ["python", "server.py"]
@@ -29,12 +38,14 @@ services:
       - ./data/py_server_2:/app/data
     depends_on:
       - broker
+      - pubsub_proxy
 
   js_server_1:
     build:
       context: ./JavaScript
     environment:
       BACKEND_ENDPOINT: tcp://broker:5556
+      PUBSUB_PUB_ENDPOINT: tcp://pubsub_proxy:5557
       SERVICE_NAME: js_server_1
       DATA_FILE: /app/data/state.json
     command: ["node", "server.js"]
@@ -42,12 +53,14 @@ services:
       - ./data/js_server_1:/app/data
     depends_on:
       - broker
+      - pubsub_proxy
 
   js_server_2:
     build:
       context: ./JavaScript
     environment:
       BACKEND_ENDPOINT: tcp://broker:5556
+      PUBSUB_PUB_ENDPOINT: tcp://pubsub_proxy:5557
       SERVICE_NAME: js_server_2
       DATA_FILE: /app/data/state.json
     command: ["node", "server.js"]
@@ -55,12 +68,14 @@ services:
       - ./data/js_server_2:/app/data
     depends_on:
       - broker
+      - pubsub_proxy
 
   py_client_1:
     build:
       context: ./Python
     environment:
       FRONTEND_ENDPOINT: tcp://broker:5555
+      PUBSUB_SUB_ENDPOINT: tcp://pubsub_proxy:5558
       USERNAME: py_bot_1
       CHANNEL_1: geral
       CHANNEL_2: duvidas
@@ -68,12 +83,14 @@ services:
     command: ["python", "client.py"]
     depends_on:
       - broker
+      - pubsub_proxy
 
   py_client_2:
     build:
       context: ./Python
     environment:
       FRONTEND_ENDPOINT: tcp://broker:5555
+      PUBSUB_SUB_ENDPOINT: tcp://pubsub_proxy:5558
       USERNAME: py_bot_2
       CHANNEL_1: geral
       CHANNEL_2: backend
@@ -81,12 +98,14 @@ services:
     command: ["python", "client.py"]
     depends_on:
       - broker
+      - pubsub_proxy
 
   js_client_1:
     build:
       context: ./JavaScript
     environment:
       FRONTEND_ENDPOINT: tcp://broker:5555
+      PUBSUB_SUB_ENDPOINT: tcp://pubsub_proxy:5558
       USERNAME: js_bot_1
       CHANNEL_1: geral
       CHANNEL_2: frontend
@@ -94,12 +113,14 @@ services:
     command: ["node", "client.js"]
     depends_on:
       - broker
+      - pubsub_proxy
 
   js_client_2:
     build:
       context: ./JavaScript
     environment:
       FRONTEND_ENDPOINT: tcp://broker:5555
+      PUBSUB_SUB_ENDPOINT: tcp://pubsub_proxy:5558
       USERNAME: js_bot_2
       CHANNEL_1: geral
       CHANNEL_2: qa
@@ -107,3 +128,4 @@ services:
     command: ["node", "client.js"]
     depends_on:
       - broker
+      - pubsub_proxy
