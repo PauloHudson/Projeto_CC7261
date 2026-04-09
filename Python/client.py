@@ -1,29 +1,32 @@
 import os
+import random
+import threading
 import time
 from datetime import datetime, timezone
+from typing import Iterable
 
 import msgpack
 import zmq
 
 
-# Este script (utilizando a linguagem Python para esse servidor) conecta ao broker, faz login e alterna entre criar canais e listar canais
-
 FRONTEND_ENDPOINT = os.getenv("FRONTEND_ENDPOINT", "tcp://broker:5555")
+PUBSUB_SUB_ENDPOINT = os.getenv("PUBSUB_SUB_ENDPOINT", "tcp://pubsub_proxy:5558")
 USERNAME = os.getenv("USERNAME", "bot_python")
-CHANNEL_CANDIDATES = [
-    os.getenv("CHANNEL_1", "geral"),
-    os.getenv("CHANNEL_2", "duvidas"),
-    os.getenv("CHANNEL_3", "avisos"),
+MESSAGE_BANK = [
+    "checando status",
+    "mensagem de teste",
+    "publicacao automatica",
+    "sincronizando canal",
+    "novo evento recebido",
+    "validando fluxo pubsub",
 ]
 
 
 def now_iso() -> str:
-    """Retorna a data e hora atual em formato ISO."""
     return datetime.now(timezone.utc).isoformat()
 
 
 def send_request(socket: zmq.Socket, payload: dict) -> dict:
-    """Envia uma requisição para o broker e aguarda a resposta."""
     payload["timestamp"] = now_iso()
     packed = msgpack.packb(payload, use_bin_type=True)
     print(f"[PY-CLIENT:{USERNAME}] TX {payload}", flush=True)
@@ -36,7 +39,6 @@ def send_request(socket: zmq.Socket, payload: dict) -> dict:
 
 
 def login_with_retry(socket: zmq.Socket) -> None:
-    """Tenta fazer login no broker com tentativas repetidas até sucesso."""
     while True:
         response = send_request(
             socket,
@@ -51,45 +53,138 @@ def login_with_retry(socket: zmq.Socket) -> None:
         time.sleep(2)
 
 
-def main() -> None:
-    """Função principal que conecta ao broker e executa o loop de operações."""
-    context = zmq.Context.instance()
-    socket = context.socket(zmq.REQ)
-    socket.connect(FRONTEND_ENDPOINT)
+def list_channels(socket: zmq.Socket) -> list[str]:
+    response = send_request(
+        socket,
+        {
+            "type": "request",
+            "action": "list_channels",
+        },
+    )
+    payload = response.get("payload", {})
+    return list(payload.get("channels", []))
 
-    print(f"[PY-CLIENT:{USERNAME}] Connected to {FRONTEND_ENDPOINT}", flush=True)
+
+def create_new_channel(socket: zmq.Socket, current_channels: Iterable[str]) -> list[str]:
+    channels = list(current_channels)
+    for _ in range(10):
+        if len(channels) >= 5:
+            return channels
+
+        candidate = f"auto_{len(channels) + 1}_{random.randint(100, 999)}"[:24]
+        response = send_request(
+            socket,
+            {
+                "type": "request",
+                "action": "create_channel",
+                "channel": candidate,
+            },
+        )
+        if response.get("status") == "ok":
+            channels = list_channels(socket)
+        else:
+            time.sleep(1)
+
+    return channels
+
+
+def ensure_subscriptions(
+    sub_socket: zmq.Socket, subscribed_channels: set[str], available_channels: list[str]
+) -> None:
+    remaining = [channel for channel in available_channels if channel not in subscribed_channels]
+    while len(subscribed_channels) < 3 and remaining:
+        channel = random.choice(remaining)
+        sub_socket.setsockopt_string(zmq.SUBSCRIBE, channel)
+        subscribed_channels.add(channel)
+        remaining.remove(channel)
+        print(f"[PY-CLIENT:{USERNAME}] SUBSCRIBED {channel}", flush=True)
+
+
+def listen_publications(sub_socket: zmq.Socket, stop_event: threading.Event) -> None:
+    poller = zmq.Poller()
+    poller.register(sub_socket, zmq.POLLIN)
+
+    while not stop_event.is_set():
+        events = dict(poller.poll(250))
+        if sub_socket not in events:
+            continue
+
+        topic, raw = sub_socket.recv_multipart()
+        publication = msgpack.unpackb(raw, raw=False)
+        received_timestamp = now_iso()
+        channel = topic.decode("utf-8")
+        print(
+            (
+                f"[PY-CLIENT:{USERNAME}] PUB channel={channel} "
+                f"message={publication.get('message')} "
+                f"sent={publication.get('published_timestamp')} "
+                f"received={received_timestamp}"
+            ),
+            flush=True,
+        )
+
+
+def publish_message(socket: zmq.Socket, channel: str) -> None:
+    message = random.choice(MESSAGE_BANK) + f" #{random.randint(1000, 9999)}"
+    send_request(
+        socket,
+        {
+            "type": "request",
+            "action": "publish_message",
+            "username": USERNAME,
+            "channel": channel,
+            "message": message,
+        },
+    )
+
+
+def main() -> None:
+    context = zmq.Context.instance()
+    req_socket = context.socket(zmq.REQ)
+    req_socket.connect(FRONTEND_ENDPOINT)
+
+    sub_socket = context.socket(zmq.SUB)
+    sub_socket.connect(PUBSUB_SUB_ENDPOINT)
+
+    print(
+        f"[PY-CLIENT:{USERNAME}] Connected to {FRONTEND_ENDPOINT} pubsub={PUBSUB_SUB_ENDPOINT}",
+        flush=True,
+    )
+
+    stop_event = threading.Event()
+    listener = threading.Thread(
+        target=listen_publications, args=(sub_socket, stop_event), daemon=True
+    )
 
     try:
-        login_with_retry(socket)
+        login_with_retry(req_socket)
 
-        step = 0
+        available_channels = list_channels(req_socket)
+        available_channels = create_new_channel(req_socket, available_channels)
+
+        subscribed_channels: set[str] = set()
+        ensure_subscriptions(sub_socket, subscribed_channels, available_channels)
+
+        listener.start()
+
         while True:
-            # Condição para a cada 3 passos criar  um canal e nos outros listr os canais
-            if step % 3 == 0:
-                channel = CHANNEL_CANDIDATES[(step // 3) % len(CHANNEL_CANDIDATES)]
-                send_request(
-                    socket,
-                    {
-                        "type": "request",
-                        "action": "create_channel",
-                        "channel": channel,
-                    },
-                )
-            else:
-                send_request(
-                    socket,
-                    {
-                        "type": "request",
-                        "action": "list_channels",
-                    },
-                )
+            if not available_channels:
+                available_channels = list_channels(req_socket)
 
-            step += 1
-            time.sleep(5)
+            channel = random.choice(available_channels)
+            for _ in range(10):
+                publish_message(req_socket, channel)
+                time.sleep(1)
+
+            available_channels = list_channels(req_socket)
+            available_channels = create_new_channel(req_socket, available_channels)
+            ensure_subscriptions(sub_socket, subscribed_channels, available_channels)
     except KeyboardInterrupt:
         print(f"[PY-CLIENT:{USERNAME}] Interrupted", flush=True)
     finally:
-        socket.close(0)
+        stop_event.set()
+        sub_socket.close(0)
+        req_socket.close(0)
         context.term()
 
 
