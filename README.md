@@ -62,6 +62,7 @@ docker compose up --build
 
 Isso vai construir e iniciar todos os containers:
 - 1 Broker ZeroMQ
+- 1 Proxy Pub/Sub ZeroMQ
 - 2 Servidores Python
 - 2 Servidores JavaScript
 - 2 Clientes Python
@@ -77,6 +78,41 @@ Para ver logs de um serviço específico:
 ```bash
 docker compose logs -f py_server_1
 docker compose logs -f js_client_1
+```
+
+## Parte 2 - Publicacao em canais
+
+A segunda parte adiciona o fluxo Publisher-Subscriber sem alterar o broker da Parte 1.
+
+### Componentes novos
+- `pubsub_proxy`: proxy ZeroMQ com `XSUB` em `5557` e `XPUB` em `5558`
+- Servidores Python e JavaScript: publicam mensagens no canal escolhido
+- Clientes Python e JavaScript: se inscrevem em canais e exibem as publicacoes recebidas
+
+### Fluxo de mensagens
+1. Cliente envia `publish_message` ao servidor com `channel`, `message` e `timestamp`
+2. Servidor valida a requisicao, persiste a publicacao e publica no tópico do canal
+3. Proxy Pub/Sub distribui a mensagem para todos os clientes inscritos naquele canal
+4. Cliente exibirá `channel`, `message`, `published_timestamp` e `received_timestamp`
+
+### Comportamento padrao dos bots
+- Ao iniciar, cada bot continua fazendo `login`
+- Se existirem menos de 5 canais, o bot cria novos canais automaticamente
+- Se estiver inscrito em menos de 3 canais, o bot se inscreve em mais um canal
+- Em seguida, o bot entra em loop infinito:
+  - escolhe um canal disponível
+  - envia 10 mensagens aleatórias com intervalo de 1 segundo
+
+### Persistencia da Parte 2
+Cada servidor agora persiste também as publicacoes realizadas:
+- `logins`
+- `channels`
+- `publications`
+
+### Exemplo de log da publicacao
+```bash
+[PY-SERVER:py_server_1] TX {'type': 'response', 'action': 'publish_message', 'status': 'ok', ...}
+[PY-CLIENT:py_bot_1] PUB channel=geral message=checando status #1234 sent=2026-04-09T... received=2026-04-09T...
 ```
 
 ## Parar os serviços
