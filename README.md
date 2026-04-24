@@ -115,6 +115,35 @@ Cada servidor agora persiste também as publicacoes realizadas:
 [PY-CLIENT:py_bot_1] PUB channel=geral message=checando status #1234 sent=2026-04-09T... received=2026-04-09T...
 ```
 
+## Parte 3 - Relogio logico e heartbeat
+
+A terceira parte adiciona sincronizacao entre processos com:
+- relogio logico em todas as mensagens de cliente, servidor, publicacao e servico de referencia;
+- servico de referencia para rank, lista de servidores e heartbeat;
+- ajuste de relogio fisico dos servidores com base no horario retornado pela referencia.
+
+### Novo servico
+- `reference`: processo REP no endpoint `tcp://*:5560`
+- arquivo: `Broker/reference_service.py`
+
+### Regras implementadas
+1. Antes de enviar qualquer mensagem, o processo incrementa `logical_clock` e inclui esse campo no payload.
+2. Ao receber mensagem, o processo atualiza `logical_clock = max(local, recebido)`.
+3. No bootstrap, cada servidor chama:
+  - `register_server` para obter rank
+  - `list_servers` para obter a lista de servidores disponiveis
+4. A cada 10 mensagens de clientes recebidas, o servidor envia `heartbeat` para manter-se ativo na referencia.
+5. A resposta da referencia inclui `current_time` e o servidor atualiza o offset do relogio fisico local.
+
+### Disponibilidade de servidores
+- O servico de referencia remove servidores sem heartbeat dentro da janela de TTL.
+- A lista retornada por `list_servers` contem pares `name` e `rank`.
+
+### Mudancas no compose
+- adicionado servico `reference`;
+- adicionada variavel `REFERENCE_ENDPOINT=tcp://reference:5560` para todos os servidores;
+- servidores agora dependem de `reference`.
+
 ## Parar os serviços
 Para parar todos os containers:
 
