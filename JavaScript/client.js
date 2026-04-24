@@ -4,7 +4,8 @@ const { pack, unpack } = require('msgpackr');
 
 const FRONTEND_ENDPOINT = process.env.FRONTEND_ENDPOINT || 'tcp://broker:5555';
 const PUBSUB_SUB_ENDPOINT = process.env.PUBSUB_SUB_ENDPOINT || 'tcp://pubsub_proxy:5558';
-const USERNAME = process.env.USERNAME || 'bot_js';
+const USERNAME = process.env.USERNAME || 'js_bot';
+
 const MESSAGE_BANK = [
   'checando status',
   'mensagem de teste',
@@ -14,23 +15,35 @@ const MESSAGE_BANK = [
   'validando fluxo pubsub',
 ];
 
+let logicalClock = 0;
+
 function nowIso() {
   return new Date().toISOString();
 }
 
-function randomItem(items) {
-  return items[Math.floor(Math.random() * items.length)];
+function logicalClockReceive(receivedValue) {
+  const incoming = Number.parseInt(receivedValue, 10);
+  logicalClock = Math.max(logicalClock, Number.isNaN(incoming) ? 0 : incoming);
+}
+
+function logicalClockSend() {
+  logicalClock += 1;
+  return logicalClock;
+}
+
+function randomItem(list) {
+  return list[Math.floor(Math.random() * list.length)];
 }
 
 async function sendRequest(socket, payload) {
   payload.timestamp = nowIso();
+  payload.logical_clock = logicalClockSend();
 
-  const encoded = pack(payload);
   console.log(`[JS-CLIENT:${USERNAME}] TX`, payload);
-  await socket.send(encoded);
-
+  await socket.send(pack(payload));
   const [raw] = await socket.receive();
   const response = unpack(raw);
+  logicalClockReceive(response.logical_clock);
   console.log(`[JS-CLIENT:${USERNAME}] RX`, response);
   return response;
 }
@@ -42,57 +55,43 @@ async function loginWithRetry(socket) {
       action: 'login',
       username: USERNAME,
     });
-
     if (response.status === 'ok') {
       return;
     }
-
     await delay(2000);
   }
 }
 
 async function listChannels(socket) {
-  const response = await sendRequest(socket, {
-    type: 'request',
-    action: 'list_channels',
-  });
-
+  const response = await sendRequest(socket, { type: 'request', action: 'list_channels' });
   return response?.payload?.channels || [];
 }
 
-async function createNewChannel(socket, currentChannels) {
-  let channels = [...currentChannels];
-
-  for (let attempt = 0; attempt < 10; attempt += 1) {
-    if (channels.length >= 5) {
-      return channels;
-    }
-
-    const candidate = `auto_${channels.length + 1}_${Math.floor(Math.random() * 900 + 100)}`.slice(0, 24);
+async function createChannelsUntilFive(socket, channels) {
+  let updated = [...channels];
+  while (updated.length < 5) {
+    const candidate = `auto_${updated.length + 1}_${Math.floor(Math.random() * 900 + 100)}`.slice(0, 24);
     const response = await sendRequest(socket, {
       type: 'request',
       action: 'create_channel',
       channel: candidate,
     });
-
     if (response.status === 'ok') {
-      channels = await listChannels(socket);
+      updated = await listChannels(socket);
     } else {
       await delay(1000);
     }
   }
-
-  return channels;
+  return updated;
 }
 
-function ensureSubscriptions(subSocket, subscribedChannels, availableChannels) {
-  const remaining = availableChannels.filter((channel) => !subscribedChannels.has(channel));
-
-  while (subscribedChannels.size < 3 && remaining.length > 0) {
-    const channel = randomItem(remaining);
+function subscribeUpToThree(subSocket, subscribed, channels) {
+  const available = channels.filter((channel) => !subscribed.has(channel));
+  while (subscribed.size < 3 && available.length > 0) {
+    const channel = randomItem(available);
     subSocket.subscribe(channel);
-    subscribedChannels.add(channel);
-    remaining.splice(remaining.indexOf(channel), 1);
+    subscribed.add(channel);
+    available.splice(available.indexOf(channel), 1);
     console.log(`[JS-CLIENT:${USERNAME}] SUBSCRIBED ${channel}`);
   }
 }
@@ -103,27 +102,27 @@ async function listenPublications(subSocket, isRunning) {
       if (!isRunning()) {
         break;
       }
-
       const publication = unpack(raw);
+      logicalClockReceive(publication.logical_clock);
       console.log(
         `[JS-CLIENT:${USERNAME}] PUB channel=${topic.toString()} message=${publication.message} sent=${publication.published_timestamp} received=${nowIso()}`,
       );
     }
   } catch (error) {
     if (isRunning()) {
-      console.error(`[JS-CLIENT:${USERNAME}] Publication listener error`, error);
+      console.error(`[JS-CLIENT:${USERNAME}] publication listener error`, error);
     }
   }
 }
 
 async function publishMessage(socket, channel) {
-  const message = `${randomItem(MESSAGE_BANK)} #${Math.floor(Math.random() * 9000 + 1000)}`;
+  const text = `${randomItem(MESSAGE_BANK)} #${Math.floor(Math.random() * 9000 + 1000)}`;
   await sendRequest(socket, {
     type: 'request',
     action: 'publish_message',
     username: USERNAME,
     channel,
-    message,
+    message: text,
   });
 }
 
@@ -135,39 +134,38 @@ async function main() {
   await subSocket.connect(PUBSUB_SUB_ENDPOINT);
 
   console.log(
-    `[JS-CLIENT:${USERNAME}] Connected to ${FRONTEND_ENDPOINT} pubsub=${PUBSUB_SUB_ENDPOINT}`,
+    `[JS-CLIENT:${USERNAME}] started frontend=${FRONTEND_ENDPOINT} pubsub=${PUBSUB_SUB_ENDPOINT}`,
   );
 
   let running = true;
-  const isRunning = () => running;
-  const listenerPromise = listenPublications(subSocket, isRunning);
+  const listenerPromise = listenPublications(subSocket, () => running);
 
   try {
     await loginWithRetry(reqSocket);
 
-    let availableChannels = await listChannels(reqSocket);
-    availableChannels = await createNewChannel(reqSocket, availableChannels);
+    let channels = await listChannels(reqSocket);
+    channels = await createChannelsUntilFive(reqSocket, channels);
 
-    const subscribedChannels = new Set();
-    ensureSubscriptions(subSocket, subscribedChannels, availableChannels);
+    const subscribed = new Set();
+    subscribeUpToThree(subSocket, subscribed, channels);
 
     while (true) {
-      if (availableChannels.length === 0) {
-        availableChannels = await listChannels(reqSocket);
+      if (channels.length === 0) {
+        channels = await listChannels(reqSocket);
       }
 
-      const channel = randomItem(availableChannels);
-      for (let index = 0; index < 10; index += 1) {
+      const channel = randomItem(channels);
+      for (let i = 0; i < 10; i += 1) {
         await publishMessage(reqSocket, channel);
         await delay(1000);
       }
 
-      availableChannels = await listChannels(reqSocket);
-      availableChannels = await createNewChannel(reqSocket, availableChannels);
-      ensureSubscriptions(subSocket, subscribedChannels, availableChannels);
+      channels = await listChannels(reqSocket);
+      channels = await createChannelsUntilFive(reqSocket, channels);
+      subscribeUpToThree(subSocket, subscribed, channels);
     }
   } catch (error) {
-    console.error(`[JS-CLIENT:${USERNAME}] Fatal error`, error);
+    console.error(`[JS-CLIENT:${USERNAME}] fatal`, error);
   } finally {
     running = false;
     subSocket.close();
@@ -177,6 +175,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error(`[JS-CLIENT:${USERNAME}] Fatal error`, error);
+  console.error(`[JS-CLIENT:${USERNAME}] fatal`, error);
   process.exit(1);
 });
