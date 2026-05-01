@@ -111,7 +111,6 @@ def handle_heartbeat(message: dict, servers: Dict[str, ServerEntry]) -> dict:
     payload = {
         "ok": True,
         "rank": servers[name].rank,
-        "current_time": now_iso(),
     }
     return response("heartbeat", "ok", payload=payload)
 

@@ -5,9 +5,19 @@ const { pack, unpack } = require('msgpackr');
 
 const BACKEND_ENDPOINT = process.env.BACKEND_ENDPOINT || 'tcp://broker:5556';
 const PUBSUB_PUB_ENDPOINT = process.env.PUBSUB_PUB_ENDPOINT || 'tcp://pubsub_proxy:5557';
+const PUBSUB_SUB_ENDPOINT = process.env.PUBSUB_SUB_ENDPOINT || 'tcp://pubsub_proxy:5558';
 const REFERENCE_ENDPOINT = process.env.REFERENCE_ENDPOINT || 'tcp://reference:5560';
 const SERVICE_NAME = process.env.SERVICE_NAME || 'js_server';
 const DATA_FILE = process.env.DATA_FILE || '/app/data/state.json';
+const SERVER_SYNC_PORT = Number.parseInt(process.env.SERVER_SYNC_PORT || '5561', 10);
+const SERVER_SYNC_BIND = `tcp://*:${SERVER_SYNC_PORT}`;
+const DEFAULT_SERVER_NAMES = ['py_server_1', 'py_server_2', 'js_server_1', 'js_server_2'];
+const ALL_SERVER_NAMES = (process.env.ALL_SERVER_NAMES || DEFAULT_SERVER_NAMES.join(','))
+  .split(',')
+  .map((item) => item.trim())
+  .filter(Boolean);
+const HEARTBEAT_INTERVAL_MESSAGES = 10;
+const SYNC_INTERVAL_MESSAGES = 15;
 
 let logicalClock = 0;
 let clockOffsetMs = 0;
@@ -42,6 +52,7 @@ function defaultState() {
     server_rank: null,
     known_servers: [],
     last_heartbeat: null,
+    coordinator_name: null,
   };
 }
 
@@ -106,6 +117,162 @@ async function referenceRequest(referenceSocket, action) {
   logicalClockReceive(response.logical_clock);
   syncPhysicalClock(response?.payload?.current_time);
   return response;
+}
+
+function peerEndpoint(serverName) {
+  return `tcp://${serverName}:${SERVER_SYNC_PORT}`;
+}
+
+async function listKnownServers(referenceSocket, state) {
+  const response = await referenceRequest(referenceSocket, 'list_servers');
+  if (response.status === 'ok') {
+    state.known_servers = response?.payload?.servers || [];
+    saveState(state);
+  }
+  return state.known_servers || [];
+}
+
+async function publishCoordinator(publisher, coordinatorName) {
+  const announcement = {
+    type: 'server_announcement',
+    action: 'coordinator_elected',
+    coordinator: coordinatorName,
+    server: SERVICE_NAME,
+    timestamp: nowIso(),
+    logical_clock: logicalClockSend(),
+  };
+  await publisher.send(['servers', pack(announcement)]);
+  console.log(`[JS-SERVER:${SERVICE_NAME}] PUB servers`, announcement);
+}
+
+async function requestPeer(serverName, action, payload = null) {
+  if (!serverName || serverName === SERVICE_NAME) {
+    return null;
+  }
+
+  const socket = new zmq.Request({ sendTimeout: 1000, receiveTimeout: 1000, linger: 0 });
+  try {
+    await socket.connect(peerEndpoint(serverName));
+    const request = {
+      type: 'server_request',
+      action,
+      server: SERVICE_NAME,
+      timestamp: nowIso(),
+      logical_clock: logicalClockSend(),
+    };
+    if (payload) {
+      request.payload = payload;
+    }
+
+    await socket.send(pack(request));
+    const [raw] = await socket.receive();
+    const response = unpack(raw);
+    logicalClockReceive(response.logical_clock);
+    return response;
+  } catch {
+    return null;
+  } finally {
+    socket.close();
+  }
+}
+
+async function electCoordinator(state, publisher, referenceSocket) {
+  const knownServers = await listKnownServers(referenceSocket, state);
+  const selfRank = Number.parseInt(state.server_rank || 0, 10);
+
+  const higherRankServers = knownServers
+    .filter((item) => item.name !== SERVICE_NAME)
+    .filter((item) => Number.parseInt(item.rank || 0, 10) > selfRank)
+    .sort((a, b) => Number.parseInt(b.rank || 0, 10) - Number.parseInt(a.rank || 0, 10));
+
+  const responders = [];
+  for (const item of higherRankServers) {
+    const response = await requestPeer(item.name, 'election_request', {
+      candidate: SERVICE_NAME,
+      candidate_rank: selfRank,
+    });
+    if (response?.status === 'ok') {
+      responders.push({
+        name: response.server || item.name,
+        rank: Number.parseInt(response?.payload?.rank || item.rank || 0, 10),
+      });
+    }
+  }
+
+  if (responders.length > 0) {
+    responders.sort((a, b) => b.rank - a.rank);
+    state.coordinator_name = responders[0].name;
+    saveState(state);
+    console.log(`[JS-SERVER:${SERVICE_NAME}] coordinator set to ${state.coordinator_name} (election response)`);
+    return state.coordinator_name;
+  }
+
+  state.coordinator_name = SERVICE_NAME;
+  saveState(state);
+  await publishCoordinator(publisher, SERVICE_NAME);
+  console.log(`[JS-SERVER:${SERVICE_NAME}] elected as coordinator`);
+  return SERVICE_NAME;
+}
+
+async function syncWithCoordinator(state, publisher, referenceSocket) {
+  let coordinatorName = String(state.coordinator_name || '').trim();
+  if (!coordinatorName) {
+    coordinatorName = await electCoordinator(state, publisher, referenceSocket);
+  }
+
+  if (coordinatorName === SERVICE_NAME) {
+    return;
+  }
+
+  const response = await requestPeer(coordinatorName, 'clock_sync_request', {
+    requester: SERVICE_NAME,
+  });
+
+  if (!response || response.status !== 'ok') {
+    console.log(`[JS-SERVER:${SERVICE_NAME}] coordinator ${coordinatorName} unavailable, triggering election`);
+    await electCoordinator(state, publisher, referenceSocket);
+    return;
+  }
+
+  const currentTime = response?.payload?.current_time;
+  syncPhysicalClock(currentTime);
+  console.log(`[JS-SERVER:${SERVICE_NAME}] synchronized with coordinator=${coordinatorName} at ${currentTime}`);
+}
+
+function handlePeerRequest(message, state) {
+  if (message.action === 'election_request') {
+    return okResponse('election_request', { ok: true, rank: Number.parseInt(state.server_rank || 0, 10) });
+  }
+
+  if (message.action === 'clock_sync_request') {
+    if (state.coordinator_name !== SERVICE_NAME) {
+      return errorResponse('clock_sync_request', 'not_coordinator');
+    }
+    return okResponse('clock_sync_request', { current_time: nowIso() });
+  }
+
+  return errorResponse(String(message.action || 'unknown'), 'unknown_peer_action');
+}
+
+function handleServerAnnouncement(raw, state) {
+  let message;
+  try {
+    message = unpack(raw);
+  } catch {
+    return;
+  }
+
+  logicalClockReceive(message.logical_clock);
+  if (message.action !== 'coordinator_elected') {
+    return;
+  }
+
+  const coordinatorName = String(message.coordinator || '').trim();
+  if (coordinatorName && coordinatorName !== state.coordinator_name) {
+    state.coordinator_name = coordinatorName;
+    saveState(state);
+    console.log(`[JS-SERVER:${SERVICE_NAME}] coordinator updated from announcement: ${coordinatorName}`);
+  }
 }
 
 function handleLogin(message, state) {
@@ -199,11 +366,18 @@ async function processRequest(message, state, publisher) {
 }
 
 async function main() {
-  const socket = new zmq.Reply();
-  await socket.connect(BACKEND_ENDPOINT);
+  const clientReply = new zmq.Reply();
+  await clientReply.connect(BACKEND_ENDPOINT);
+
+  const peerReply = new zmq.Reply();
+  await peerReply.bind(SERVER_SYNC_BIND);
 
   const publisher = new zmq.Publisher();
   await publisher.connect(PUBSUB_PUB_ENDPOINT);
+
+  const subscriber = new zmq.Subscriber();
+  await subscriber.connect(PUBSUB_SUB_ENDPOINT);
+  subscriber.subscribe('servers');
 
   const referenceSocket = new zmq.Request();
   await referenceSocket.connect(REFERENCE_ENDPOINT);
@@ -221,37 +395,78 @@ async function main() {
     state.known_servers = listResponse?.payload?.servers || [];
   }
 
+  if ((state.known_servers || []).length > 0) {
+    const sorted = [...state.known_servers].sort((a, b) => Number.parseInt(b.rank || 0, 10) - Number.parseInt(a.rank || 0, 10));
+    state.coordinator_name = sorted[0].name;
+  } else {
+    state.coordinator_name = SERVICE_NAME;
+  }
+
+  if (state.coordinator_name === SERVICE_NAME) {
+    await publishCoordinator(publisher, SERVICE_NAME);
+  }
+
   saveState(state);
 
   console.log(
-    `[JS-SERVER:${SERVICE_NAME}] started backend=${BACKEND_ENDPOINT} pubsub=${PUBSUB_PUB_ENDPOINT} reference=${REFERENCE_ENDPOINT} rank=${state.server_rank}`,
+    `[JS-SERVER:${SERVICE_NAME}] started backend=${BACKEND_ENDPOINT} pubsub=${PUBSUB_PUB_ENDPOINT} reference=${REFERENCE_ENDPOINT} rank=${state.server_rank} coordinator=${state.coordinator_name} sync_bind=${SERVER_SYNC_BIND}`,
   );
 
   let messagesReceived = 0;
-  try {
-    for await (const [raw] of socket) {
+
+  const clientLoop = async () => {
+    for await (const [raw] of clientReply) {
       const message = unpack(raw);
       logicalClockReceive(message.logical_clock);
       console.log(`[JS-SERVER:${SERVICE_NAME}] RX`, message);
 
       const response = await processRequest(message, state, publisher);
-      await socket.send(pack(response));
+      await clientReply.send(pack(response));
       console.log(`[JS-SERVER:${SERVICE_NAME}] TX`, response);
 
       messagesReceived += 1;
-      if (messagesReceived % 10 === 0) {
+      if (messagesReceived % HEARTBEAT_INTERVAL_MESSAGES === 0) {
         const heartbeatResponse = await referenceRequest(referenceSocket, 'heartbeat');
         if (heartbeatResponse.status === 'ok') {
-          state.last_heartbeat = heartbeatResponse?.payload?.current_time || null;
+          state.last_heartbeat = nowIso();
           saveState(state);
         }
       }
+
+      if (messagesReceived % SYNC_INTERVAL_MESSAGES === 0) {
+        await syncWithCoordinator(state, publisher, referenceSocket);
+      }
     }
+  };
+
+  const peerLoop = async () => {
+    for await (const [raw] of peerReply) {
+      const message = unpack(raw);
+      logicalClockReceive(message.logical_clock);
+      console.log(`[JS-SERVER:${SERVICE_NAME}] PEER-RX`, message);
+      const response = handlePeerRequest(message, state);
+      await peerReply.send(pack(response));
+      console.log(`[JS-SERVER:${SERVICE_NAME}] PEER-TX`, response);
+    }
+  };
+
+  const announcementLoop = async () => {
+    for await (const [topic, raw] of subscriber) {
+      if (topic.toString() === 'servers') {
+        handleServerAnnouncement(raw, state);
+      }
+    }
+  };
+
+  try {
+    await Promise.all([clientLoop(), peerLoop(), announcementLoop()]);
   } catch (error) {
     console.error(`[JS-SERVER:${SERVICE_NAME}] fatal`, error);
   } finally {
-    socket.close();
+    clientReply.close();
+    peerReply.close();
     publisher.close();
+    subscriber.close();
     referenceSocket.close();
   }
 }
