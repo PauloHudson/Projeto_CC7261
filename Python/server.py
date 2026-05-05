@@ -291,6 +291,23 @@ def handle_peer_request(message: dict[str, Any], state: dict[str, Any]) -> dict[
             return error_response("clock_sync_request", "not_coordinator")
         return ok_response("clock_sync_request", {"current_time": now_iso()})
 
+    if action == "replicate_publication":
+        pub = (message.get("payload") or {}).get("publication")
+        if not isinstance(pub, dict):
+            return error_response("replicate_publication", "missing_publication")
+
+        # detect duplicate by request_timestamp + server + published_timestamp
+        exists = any(
+            (p.get("request_timestamp") == pub.get("request_timestamp")
+             and p.get("server") == pub.get("server")
+             and p.get("published_timestamp") == pub.get("published_timestamp"))
+            for p in state.get("publications", [])
+        )
+        if not exists:
+            state.setdefault("publications", []).append(pub)
+            save_state(state)
+        return ok_response("replicate_publication", {"replicated": not exists})
+
     return error_response(action or "unknown", "unknown_peer_action")
 
 
@@ -379,6 +396,16 @@ def handle_publish_message(
     save_state(state)
 
     publisher.send_multipart([channel.encode("utf-8"), msgpack.packb(publication, use_bin_type=True)])
+
+    # Replicate publication to other known servers so all servers hold full history
+    for srv in list(state.get("known_servers") or []):
+        try:
+            peer_name = str(srv.get("name") or "")
+            if peer_name and peer_name != SERVICE_NAME:
+                request_peer(peer_name, "replicate_publication", {"publication": publication})
+        except Exception:
+            # best-effort replication; ignore failures
+            pass
 
     return ok_response(
         "publish_message",

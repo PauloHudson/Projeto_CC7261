@@ -251,6 +251,23 @@ function handlePeerRequest(message, state) {
     return okResponse('clock_sync_request', { current_time: nowIso() });
   }
 
+  if (message.action === 'replicate_publication') {
+    const pub = message?.payload?.publication;
+    if (!pub || typeof pub !== 'object') {
+      return errorResponse('replicate_publication', 'missing_publication');
+    }
+
+    const exists = (state.publications || []).some(
+      (p) => p.request_timestamp === pub.request_timestamp && p.server === pub.server && p.published_timestamp === pub.published_timestamp,
+    );
+    if (!exists) {
+      state.publications = state.publications || [];
+      state.publications.push(pub);
+      saveState(state);
+    }
+    return okResponse('replicate_publication', { replicated: !exists });
+  }
+
   return errorResponse(String(message.action || 'unknown'), 'unknown_peer_action');
 }
 
@@ -341,6 +358,19 @@ async function handlePublishMessage(message, state, publisher) {
   state.publications.push(publication);
   saveState(state);
   await publisher.send([channel, pack(publication)]);
+
+  // Best-effort: replicate this publication to other known servers so all servers keep full history
+  for (const srv of state.known_servers || []) {
+    try {
+      const peerName = String(srv.name || '').trim();
+      if (peerName && peerName !== SERVICE_NAME) {
+        // fire-and-forget; do not await so publishing is fast
+        requestPeer(peerName, 'replicate_publication', { publication }).catch(() => {});
+      }
+    } catch (err) {
+      // ignore
+    }
+  }
 
   return okResponse('publish_message', {
     channel,
