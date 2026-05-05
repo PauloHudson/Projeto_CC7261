@@ -191,3 +191,29 @@ docker compose down -v
 docker system prune -f
 docker compose up --build
 ```
+## Parte 5 - Consistência e replicação
+
+Problema: o broker faz balanceamento round-robin, então cada servidor recebe apenas uma parcela das publicações. Se um servidor cair, parte do histórico fica inacessível. A solução adotada aqui faz com que todos os servidores mantenham todas as publicações.
+
+Método escolhido: réplica por push eager (best-effort)
+- Quando um servidor publica uma mensagem ele a persiste localmente e envia, em modo best-effort, um pedido replicate_publication para os peers conhecidos.
+- Os peers recebem o pedido e armazenam a publicação caso ainda não a tenham (checagem por request_timestamp + server + published_timestamp).
+
+Vantagens/limitações:
+- Simples de implementar.
+- Modelo eventual: se um peer estiver indisponível no momento da réplica, a cópia poderá ser perdida (melhorias possíveis: retries, ack/replicate log, quorum ou replicação síncrona).
+
+Como validar localmente:
+1. Inicie o ambiente:
+bash
+docker compose up --build 
+
+2. Observe os logs dos servidores para mensagens de publicação e requisições de réplica:
+bash
+docker compose logs --tail=200
+
+3. Verifique os arquivos de dados dos servidores data/<server>/state.json — todas as publicações devem existir em cada servidor após algum tempo.
+
+Notas de implementação:
+- Arquivos alterados: Python/server.py, JavaScript/server.js — ambos enviam replicate_publication para peers após publicar.
+- Handler replicate_publication foi adicionado aos endpoints de peer (REQ/REP) e faz deduplicação antes de gravar.
